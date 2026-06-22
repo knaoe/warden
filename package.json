@@ -1,0 +1,12 @@
+{
+  "name": "warden",
+  "version": "0.1.0",
+  "description": "Authoritative coordination ledger for multi-agent work on Cloudflare Workers + D1, with epoch fencing.",
+  "type": "module",
+  "scripts": {
+    "schema": "wrangler d1 execute warden --remote --file schema.sql",
+    "deploy": "wrangler deploy",
+    "demo": "node demo.mjs"
+  },
+  "license": "MIT"
+}

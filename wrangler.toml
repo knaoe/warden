@@ -1,0 +1,11 @@
+name = "warden"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+
+# Create your own D1 (`wrangler d1 create warden --location <hint>`) and paste
+# the returned database_id below. database_id is an identifier, not a secret,
+# but keep it pointing at your own database.
+[[d1_databases]]
+binding = "DB"
+database_name = "warden"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
