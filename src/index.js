@@ -1,9 +1,11 @@
 // warden — coordination ledger API on Cloudflare Workers + D1.
-// Routing: Hono. Input validation: Zod. SQL: D1 prepared statements with
-// .bind() everywhere (no user input is ever interpolated into SQL text).
+// Routing: Hono. Input validation: Zod. Auth: Ed25519 request signatures (auth.js).
+// SQL: D1 prepared statements with .bind() everywhere (no user input is ever
+// interpolated into SQL text).
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
+import { authenticate } from "./auth.js";
 
 const STATES = ["queued", "running", "blocked", "needs_you", "verifying", "done"];
 
@@ -27,11 +29,21 @@ const stateSchema = z.object({
 
 const app = new Hono();
 
+// Auth: every route except the public health root requires a valid Ed25519 signature.
+app.use("*", async (c, next) => {
+  if (c.req.method === "GET" && c.req.path === "/") return next();
+  const r = await authenticate(c);
+  if (!r.ok) return c.json({ error: "unauthorized", reason: r.reason }, r.status);
+  c.set("identity", r.identity);
+  await next();
+});
+
 app.get("/", (c) =>
   c.json({
     ok: true,
     service: "warden",
     endpoints: ["GET /portfolio", "POST /work", "GET /work", "POST /work/:id/claim", "POST /work/:id/state"],
+    auth: "Ed25519 request signature: X-Warden-Account / X-Warden-Timestamp / X-Warden-Signature",
   }));
 
 // Attention-first portfolio briefing ("how is everything?").

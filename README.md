@@ -24,6 +24,37 @@ The fencing model is **stable logical identity, disposable process incarnation**
 
 Routing is [Hono](https://hono.dev); request bodies are validated with [Zod](https://zod.dev) and rejected with `400` before any database access. All SQL uses D1 prepared statements with bound parameters (no user input is interpolated into SQL text).
 
+## Auth
+
+Every route except `GET /` (health) requires an **Ed25519 request signature**. Each caller is a *service account* with its own software key; warden stores only the public key (`service_accounts` table). No shared secret crosses the wire, and signing is local and unattended (no passkey / interactive step).
+
+Headers: `X-Warden-Account`, `X-Warden-Timestamp` (unix seconds), `X-Warden-Signature` (base64 of the 64-byte ed25519 signature). The signed message is:
+
+```
+v1\n<METHOD>\n<path+query>\n<unix-timestamp>\n<sha256hex(body)>
+```
+
+Requests outside a ±300s clock window, from an unknown/disabled account, or with a bad signature get `401`.
+
+Add a service account:
+
+```sh
+node scripts/warden-keygen.mjs pmo        # writes warden-pmo.pem (private, gitignored); prints the public key
+wrangler d1 execute warden --remote --command \
+  "INSERT INTO service_accounts (id,pubkey) VALUES ('pmo','<printed-pubkey>');"
+```
+
+Revoke with `UPDATE service_accounts SET disabled=1 WHERE id='pmo';`.
+
+Sign + call (the helper emits headers one per line; pair with `curl -H @file`):
+
+```sh
+node scripts/warden-sign.mjs pmo warden-pmo.pem GET /portfolio > /tmp/h
+curl -H @/tmp/h https://warden.<subdomain>.workers.dev/portfolio
+```
+
+Real callers sign in-process (Node `crypto.sign(null, msg, ed25519Key)`); `warden-sign.mjs` shows the canonical message.
+
 ## Data model
 
 `work_items` (id, project, title, state, priority, owner, owner_epoch, lease_until, blocked_reason, next_action, needs_you, updated_at) plus an append-only `events` audit log. See [`schema.sql`](schema.sql).
@@ -52,7 +83,7 @@ WARDEN_URL="https://warden.<your-subdomain>.workers.dev" node demo.mjs
 
 ## Status / not yet
 
-- **No auth.** Add an auth layer (Cloudflare Access service token / mTLS, a bearer token, or request signing) before exposing this. It is a private control plane, not a public API.
+- Auth is **Ed25519 request signatures** (see [Auth](#auth)) — a private control plane. Clock-skew window is ±300s; add a nonce store if you need stricter replay protection.
 - `commands` / `leases` / `attempts` are folded into `work_items` for now.
 - No lease-expiry reclaim yet (correctness is guaranteed by epoch fencing, not by lease timeout).
 - Clients should retry on transient D1 errors (treat writes as at-least-once + idempotent).

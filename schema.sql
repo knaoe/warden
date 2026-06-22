@@ -21,3 +21,13 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_wi_state ON work_items(state, priority);
 CREATE INDEX IF NOT EXISTS idx_wi_project ON work_items(project);
+
+-- Service accounts: each caller (PMO front-door, per-project PMs, ...) has a
+-- software ed25519 key; warden stores only the public key. Requests are signed
+-- (see src/auth.js). Revoke by setting disabled=1.
+CREATE TABLE IF NOT EXISTS service_accounts (
+  id TEXT PRIMARY KEY,
+  pubkey TEXT NOT NULL,                       -- base64 of the raw 32-byte ed25519 public key
+  disabled INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
