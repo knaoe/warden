@@ -22,6 +22,8 @@ The fencing model is **stable logical identity, disposable process incarnation**
 - `POST /work/:id/claim` — claim with a fencing token: `{ owner, epoch }`. Succeeds only if `epoch > stored owner_epoch` (newer incarnation wins; stale → `409`).
 - `POST /work/:id/state` — update state: `{ state, epoch, blocked_reason?, next_action?, needs_you? }`, fenced (`epoch >= owner_epoch`; stale writer → `409`).
 
+Routing is [Hono](https://hono.dev); request bodies are validated with [Zod](https://zod.dev) and rejected with `400` before any database access. All SQL uses D1 prepared statements with bound parameters (no user input is interpolated into SQL text).
+
 ## Data model
 
 `work_items` (id, project, title, state, priority, owner, owner_epoch, lease_until, blocked_reason, next_action, needs_you, updated_at) plus an append-only `events` audit log. See [`schema.sql`](schema.sql).
@@ -31,6 +33,9 @@ States: `queued | running | blocked | needs_you | verifying | done`.
 ## Deploy
 
 ```sh
+# 0. Install dependencies (Hono + Zod)
+npm install
+
 # 1. Create a D1 database (pick a location hint near you, e.g. apac / weur / enam)
 wrangler d1 create warden --location apac
 #    -> paste the returned database_id into wrangler.toml

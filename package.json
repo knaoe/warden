@@ -8,5 +8,10 @@
     "deploy": "wrangler deploy",
     "demo": "node demo.mjs"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@hono/zod-validator": "^0.8.0",
+    "hono": "^4.12.26",
+    "zod": "^4.4.3"
+  }
 }
