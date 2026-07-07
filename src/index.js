@@ -19,13 +19,20 @@ const claimSchema = z.object({
   owner: z.string().min(1).max(120),
   epoch: z.number().int().nonnegative(),
 });
-const stateSchema = z.object({
-  state: z.enum(STATES),
-  epoch: z.number().int().nonnegative(),
-  blocked_reason: z.string().max(500).optional(),
-  next_action: z.string().max(500).optional(),
-  needs_you: z.boolean().optional(),
-});
+// Partial update: only fields present in the request are written. Omitted
+// fields keep their current values; an explicit null clears a text field.
+const stateSchema = z
+  .object({
+    epoch: z.number().int().nonnegative(),
+    state: z.enum(STATES).optional(),
+    blocked_reason: z.string().max(500).nullable().optional(),
+    next_action: z.string().max(500).nullable().optional(),
+    needs_you: z.boolean().optional(),
+  })
+  .refine(
+    (b) => b.state !== undefined || b.blocked_reason !== undefined || b.next_action !== undefined || b.needs_you !== undefined,
+    { message: "no fields to update" },
+  );
 
 const app = new Hono();
 
@@ -71,7 +78,8 @@ app.post("/work", zValidator("json", createSchema), async (c) => {
     `INSERT INTO work_items (id, project, title, priority, next_action, state)
      VALUES (?, ?, ?, ?, ?, 'queued')`)
     .bind(id, b.project, b.title, b.priority ?? 100, b.next_action ?? null).run();
-  await db.prepare(`INSERT INTO events (work_item_id, kind, detail) VALUES (?, 'created', ?)`).bind(id, b.title).run();
+  await db.prepare(`INSERT INTO events (work_item_id, kind, detail) VALUES (?, 'created', ?)`)
+    .bind(id, `${b.title} by=${c.get("identity")}`).run();
   const item = (await db.prepare(`SELECT * FROM work_items WHERE id=?`).bind(id).all()).results[0];
   return c.json({ created: item });
 });
@@ -96,26 +104,33 @@ app.post("/work/:id/claim", zValidator("json", claimSchema), async (c) => {
     .bind(owner, epoch, leaseUntil, id).run();
   const claimed = res.meta.changes > 0;
   await db.prepare(`INSERT INTO events (work_item_id, kind, detail) VALUES (?, ?, ?)`)
-    .bind(id, claimed ? "claimed" : "claim_rejected", `${owner} epoch=${epoch}`).run();
+    .bind(id, claimed ? "claimed" : "claim_rejected", `${owner} epoch=${epoch} by=${c.get("identity")}`).run();
   const item = (await db.prepare(`SELECT id, owner, owner_epoch, state, lease_until FROM work_items WHERE id=?`).bind(id).all()).results[0];
   return c.json({ claimed, reason: claimed ? null : "stale_epoch_or_not_found", item }, claimed ? 200 : 409);
 });
 
-// Fenced state update: caller's epoch must be >= current owner_epoch, so a
-// superseded incarnation cannot overwrite the current owner's decisions.
+// Fenced partial state update: caller's epoch must be >= current owner_epoch,
+// so a superseded incarnation cannot overwrite the current owner's decisions.
+// Only the fields present in the request are written (see stateSchema).
 app.post("/work/:id/state", zValidator("json", stateSchema), async (c) => {
   const db = c.env.DB;
   const id = c.req.param("id");
   const b = c.req.valid("json");
+  const sets = [];
+  const binds = [];
+  for (const [col, val] of Object.entries({ state: b.state, blocked_reason: b.blocked_reason, next_action: b.next_action })) {
+    if (val !== undefined) { sets.push(`${col}=?`); binds.push(val); }
+  }
+  if (b.needs_you !== undefined) { sets.push(`needs_you=?`); binds.push(b.needs_you ? 1 : 0); }
+  sets.push(`updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')`);
   const res = await db.prepare(
-    `UPDATE work_items
-        SET state=?1, blocked_reason=?2, next_action=?3, needs_you=?4,
-            updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-      WHERE id=?5 AND ?6 >= owner_epoch`)
-    .bind(b.state, b.blocked_reason ?? null, b.next_action ?? null, b.needs_you ? 1 : 0, id, b.epoch).run();
+    `UPDATE work_items SET ${sets.join(", ")} WHERE id=? AND ? >= owner_epoch`)
+    .bind(...binds, id, b.epoch).run();
   const ok = res.meta.changes > 0;
+  const changed = Object.entries(b).filter(([k, v]) => k !== "epoch" && v !== undefined)
+    .map(([k, v]) => `${k}=${v}`).join(" ");
   await db.prepare(`INSERT INTO events (work_item_id, kind, detail) VALUES (?, ?, ?)`)
-    .bind(id, ok ? "state" : "state_rejected", `${b.state} epoch=${b.epoch}`).run();
+    .bind(id, ok ? "state" : "state_rejected", `${changed} epoch=${b.epoch} by=${c.get("identity")}`).run();
   const item = (await db.prepare(`SELECT id, state, owner_epoch, needs_you FROM work_items WHERE id=?`).bind(id).all()).results[0];
   return c.json({ ok, reason: ok ? null : "stale_epoch", item }, ok ? 200 : 409);
 });
