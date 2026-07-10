@@ -8,4 +8,4 @@ compatibility_date = "2026-06-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "warden"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "e807bb63-9e01-4420-b384-f4fad3f97279"
