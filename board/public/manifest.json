@@ -1,0 +1,13 @@
+{
+  "name": "Vigil Coordination Board",
+  "short_name": "Vigil",
+  "description": "Attention-first view of the warden coordination ledger",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#131c2b",
+  "theme_color": "#131c2b",
+  "icons": [
+    { "src": "/icons/vigil-appicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
