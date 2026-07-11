@@ -1,7 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createBoardApp } from "../server.mjs";
+import * as server from "../server.mjs";
+
+const { createBoardApp } = server;
+
+test("startup config fails fast when WARDEN_URL is unset", () => {
+  assert.throws(
+    () => server.readBoardConfig({}),
+    { message: "WARDEN_URL is required" },
+  );
+});
+
+test("startup config uses the configured WARDEN_URL", () => {
+  const config = server.readBoardConfig({ WARDEN_URL: "https://warden.example.test/base" });
+
+  assert.equal(config.baseUrl, "https://warden.example.test/base");
+  assert.equal(config.account, "board");
+  assert.equal(config.keyFile, "board/warden-board.pem");
+});
 
 test("GET /api/board returns the current warden snapshot without caching", async () => {
   const app = createBoardApp({

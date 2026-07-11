@@ -25,14 +25,20 @@ export function createBoardApp({ client }) {
   return app;
 }
 
+export function readBoardConfig(env) {
+  const baseUrl = env.WARDEN_URL?.trim();
+  if (!baseUrl) throw new Error("WARDEN_URL is required");
+  return {
+    baseUrl,
+    account: env.WARDEN_BOARD_ACCOUNT || "board",
+    keyFile: env.WARDEN_BOARD_KEY_FILE || "board/warden-board.pem",
+  };
+}
+
 function start() {
   const port = Number.parseInt(process.env.PORT || "8090", 10);
   const hostname = process.env.HOST || "0.0.0.0";
-  const client = createWardenClient({
-    baseUrl: process.env.WARDEN_URL || "https://warden.amber-tokyo.workers.dev",
-    account: process.env.WARDEN_BOARD_ACCOUNT || "board",
-    keyFile: process.env.WARDEN_BOARD_KEY_FILE || "board/warden-board.pem",
-  });
+  const client = createWardenClient(readBoardConfig(process.env));
   serve({ fetch: createBoardApp({ client }).fetch, port, hostname }, (info) => {
     console.log(`[vigil] listening on http://${hostname}:${info.port}`);
   });
