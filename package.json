@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "board": "node board/server.mjs",
+    "migrate": "wrangler d1 migrations apply warden",
     "schema": "wrangler d1 execute warden --remote --file schema.sql",
     "deploy": "wrangler deploy",
     "demo": "node demo.mjs",
