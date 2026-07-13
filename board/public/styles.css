@@ -59,7 +59,7 @@ p, h1, h2, h3 { margin: 0; }
 .health small { font: 400 9px/1.2 "IBM Plex Mono", monospace; color: var(--muted-dark); white-space: nowrap; }
 
 .dashboard { min-height: calc(100vh - 56px); display: grid; grid-template-columns: minmax(0, 1fr) 272px; background: var(--surface); }
-.matrix-region { min-width: 0; overflow-x: auto; }
+.matrix-region { min-width: 0; overflow-x: auto; overflow-y: visible; }
 .matrix { min-width: 1030px; }
 .matrix-header, .project-row { display: grid; grid-template-columns: 170px repeat(5, minmax(150px, 1fr)); }
 .matrix-header { position: sticky; top: 56px; z-index: 30; min-height: 40px; background: var(--surface-raised); border-bottom: 1px solid var(--line); }

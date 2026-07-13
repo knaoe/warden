@@ -1,7 +1,7 @@
 export const STATUS_COLUMNS = [
   { key: "queued", label: "QUEUED" },
   { key: "executing", label: "EXECUTING" },
-  { key: "reviewVerify", label: "REVIEW-VERIFY" },
+  { key: "reviewVerify", label: "REVIEW / VERIFY" },
   { key: "needsUser", label: "NEEDS USER" },
   { key: "waitingExternal", label: "WAITING EXTERNAL" },
 ];
