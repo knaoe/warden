@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS work_items (
   blocked_reason TEXT,
   next_action TEXT,
   needs_you INTEGER NOT NULL DEFAULT 0,
+  assignee TEXT,
+  external_url TEXT,
+  gate_status TEXT,
+  gate_updated_at TEXT,
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 CREATE TABLE IF NOT EXISTS events (

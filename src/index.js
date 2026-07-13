@@ -8,6 +8,11 @@ import { z } from "zod";
 import { authenticate } from "./auth.js";
 
 const STATES = ["queued", "running", "blocked", "needs_you", "verifying", "done"];
+const GATE_STATUSES = ["unknown", "pending", "passing", "failing", "review", "merged", "none"];
+const httpUrl = z.string().max(2048).url().refine((value) => {
+  const protocol = new URL(value).protocol;
+  return protocol === "http:" || protocol === "https:";
+}, { message: "external_url must use http or https" });
 
 const createSchema = z.object({
   project: z.string().min(1).max(80),
@@ -28,9 +33,13 @@ const stateSchema = z
     blocked_reason: z.string().max(500).nullable().optional(),
     next_action: z.string().max(500).nullable().optional(),
     needs_you: z.boolean().optional(),
+    assignee: z.string().max(120).nullable().optional(),
+    external_url: httpUrl.nullable().optional(),
+    gate_status: z.enum(GATE_STATUSES).nullable().optional(),
   })
   .refine(
-    (b) => b.state !== undefined || b.blocked_reason !== undefined || b.next_action !== undefined || b.needs_you !== undefined,
+    (b) => b.state !== undefined || b.blocked_reason !== undefined || b.next_action !== undefined || b.needs_you !== undefined
+      || b.assignee !== undefined || b.external_url !== undefined || b.gate_status !== undefined,
     { message: "no fields to update" },
   );
 
@@ -118,10 +127,18 @@ app.post("/work/:id/state", zValidator("json", stateSchema), async (c) => {
   const b = c.req.valid("json");
   const sets = [];
   const binds = [];
-  for (const [col, val] of Object.entries({ state: b.state, blocked_reason: b.blocked_reason, next_action: b.next_action })) {
+  for (const [col, val] of Object.entries({
+    state: b.state,
+    blocked_reason: b.blocked_reason,
+    next_action: b.next_action,
+    assignee: b.assignee,
+    external_url: b.external_url,
+    gate_status: b.gate_status,
+  })) {
     if (val !== undefined) { sets.push(`${col}=?`); binds.push(val); }
   }
   if (b.needs_you !== undefined) { sets.push(`needs_you=?`); binds.push(b.needs_you ? 1 : 0); }
+  if (b.gate_status !== undefined) sets.push(`gate_updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')`);
   sets.push(`updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')`);
   const res = await db.prepare(
     `UPDATE work_items SET ${sets.join(", ")} WHERE id=? AND ? >= owner_epoch`)
@@ -131,7 +148,10 @@ app.post("/work/:id/state", zValidator("json", stateSchema), async (c) => {
     .map(([k, v]) => `${k}=${v}`).join(" ");
   await db.prepare(`INSERT INTO events (work_item_id, kind, detail) VALUES (?, ?, ?)`)
     .bind(id, ok ? "state" : "state_rejected", `${changed} epoch=${b.epoch} by=${c.get("identity")}`).run();
-  const item = (await db.prepare(`SELECT id, state, owner_epoch, needs_you FROM work_items WHERE id=?`).bind(id).all()).results[0];
+  const item = (await db.prepare(
+    `SELECT id, state, owner_epoch, needs_you, assignee, external_url, gate_status, gate_updated_at
+       FROM work_items WHERE id=?`,
+  ).bind(id).all()).results[0];
   return c.json({ ok, reason: ok ? null : "stale_epoch", item }, ok ? 200 : 409);
 });
 

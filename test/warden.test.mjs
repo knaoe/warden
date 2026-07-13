@@ -102,6 +102,48 @@ test("partial /state update writes only present fields", async () => {
   assert.equal(item.next_action, "keep me"); // untouched by the partial update
 });
 
+test("/state accepts an assignee-only update", async () => {
+  const c = await req("POST", "/work", { project: "p", title: "assign-me" });
+  const id = c.body.created.id;
+
+  const r = await req("POST", `/work/${id}/state`, { epoch: 0, assignee: "dashboard-p1" });
+
+  assert.equal(r.status, 200);
+  assert.equal(r.body.ok, true);
+  const list = await req("GET", "/work");
+  assert.equal(list.body.items.find((item) => item.id === id).assignee, "dashboard-p1");
+});
+
+test("/state accepts only http(s) external URLs of bounded length", async () => {
+  const c = await req("POST", "/work", { project: "p", title: "link-me" });
+  const id = c.body.created.id;
+
+  const unsafe = await req("POST", `/work/${id}/state`, { epoch: 0, external_url: "javascript:alert(1)" });
+  const tooLong = await req("POST", `/work/${id}/state`, { epoch: 0, external_url: `https://example.com/${"a".repeat(2050)}` });
+  const safe = await req("POST", `/work/${id}/state`, { epoch: 0, external_url: "https://example.com/work/1" });
+
+  assert.equal(unsafe.status, 400);
+  assert.equal(tooLong.status, 400);
+  assert.equal(safe.status, 200);
+  const list = await req("GET", "/work");
+  assert.equal(list.body.items.find((item) => item.id === id).external_url, "https://example.com/work/1");
+});
+
+test("/state validates gate status and timestamps accepted gate updates on the server", async () => {
+  const c = await req("POST", "/work", { project: "p", title: "gate-me" });
+  const id = c.body.created.id;
+
+  const invalid = await req("POST", `/work/${id}/state`, { epoch: 0, gate_status: "surprise" });
+  const valid = await req("POST", `/work/${id}/state`, { epoch: 0, gate_status: "pending" });
+
+  assert.equal(invalid.status, 400);
+  assert.equal(valid.status, 200);
+  const list = await req("GET", "/work");
+  const item = list.body.items.find((candidate) => candidate.id === id);
+  assert.equal(item.gate_status, "pending");
+  assert.match(item.gate_updated_at, /^\d{4}-\d{2}-\d{2}T/);
+});
+
 test("stale-epoch state write is rejected 409", async () => {
   const c = await req("POST", "/work", { project: "p", title: "stale-state" });
   const id = c.body.created.id;

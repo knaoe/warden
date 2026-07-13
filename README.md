@@ -61,6 +61,41 @@ Real callers sign in-process (Node `crypto.sign(null, msg, ed25519Key)`); `warde
 
 States: `queued | running | blocked | needs_you | verifying | done`.
 
+### Production migration warning
+
+> [!WARNING]
+> Production D1 database `e807bb63-9e01-4420-b384-f4fad3f97279` was manually
+> altered on 2026-07-11 to add `assignee`, `external_url`, `gate_status`, and
+> `gate_updated_at`. Its schema is ahead of its `d1_migrations` ledger.
+
+Do **not** run either of these commands against production:
+
+```sh
+npm run migrate -- --remote
+wrangler d1 migrations apply warden --remote
+```
+
+Do not execute `migrations/0001_add_coordination_columns.sql` directly against
+production either. The four columns already exist, so replaying its `ALTER
+TABLE` statements would fail without fixing the ledger mismatch.
+
+Before any production migration, obtain separate production approval, verify
+that all four columns exist, and reconcile the `d1_migrations` ledger so
+`0001_add_coordination_columns.sql` is recorded as already applied **without
+rerunning its SQL**. Only then may a later migration be considered.
+
+Local migration testing remains allowed:
+
+```sh
+npm run migrate -- --local
+npm run migrate -- --local --persist-to /tmp/warden-local
+```
+
+Use that path only for a local or greenfield database that still has the
+pre-dashboard schema and does not already contain the four columns. A database
+created from the current `schema.sql` already has them and must not replay
+migration `0001`.
+
 ## Deploy
 
 ```sh

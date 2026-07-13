@@ -4,6 +4,8 @@
   "description": "Authoritative coordination ledger for multi-agent work on Cloudflare Workers + D1, with epoch fencing.",
   "type": "module",
   "scripts": {
+    "board": "node board/server.mjs",
+    "migrate": "wrangler d1 migrations apply warden",
     "schema": "wrangler d1 execute warden --remote --file schema.sql",
     "deploy": "wrangler deploy",
     "demo": "node demo.mjs",
@@ -11,6 +13,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@hono/node-server": "^2.0.8",
     "@hono/zod-validator": "^0.8.0",
     "hono": "^4.12.26",
     "zod": "^4.4.3"
