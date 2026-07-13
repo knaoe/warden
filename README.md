@@ -119,6 +119,8 @@ WARDEN_URL="https://warden.<your-subdomain>.workers.dev" node demo.mjs
 ## Status / not yet
 
 - Auth is **Ed25519 request signatures** (see [Auth](#auth)) — a private control plane. Clock-skew window is ±300s; add a nonce store if you need stricter replay protection.
+- Warden authenticates the calling service account but does not yet enforce per-account route/method scope — any registered account can call any route. Least privilege is currently conventional, not server-enforced.
+- Vigil (`board/`) has **no auth of its own**: `board/server.mjs` binds `0.0.0.0` by default and `GET /api/board` relays the full ledger snapshot to any caller who can reach it. Fine on a private tailnet/LAN; do not expose it publicly or bind it to a public interface.
 - `commands` / `leases` / `attempts` are folded into `work_items` for now.
 - No lease-expiry reclaim yet (correctness is guaranteed by epoch fencing, not by lease timeout).
 - Clients should retry on transient D1 errors (treat writes as at-least-once + idempotent).
