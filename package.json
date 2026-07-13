@@ -6,12 +6,16 @@
   "scripts": {
     "schema": "wrangler d1 execute warden --remote --file schema.sql",
     "deploy": "wrangler deploy",
-    "demo": "node demo.mjs"
+    "demo": "node demo.mjs",
+    "test": "node --test"
   },
   "license": "MIT",
   "dependencies": {
     "@hono/zod-validator": "^0.8.0",
     "hono": "^4.12.26",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "wrangler": "^4.103.0"
   }
 }
