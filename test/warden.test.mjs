@@ -1,7 +1,7 @@
 // Integration tests against a local D1 emulation (wrangler's getPlatformProxy,
 // backed by the real workerd/Miniflare D1 implementation — not a hand-rolled mock).
 // Covers: create, claim + epoch fencing, stale-epoch 409, partial /state update,
-// GET /work, GET /portfolio.
+// GET /work, GET /events, GET /portfolio.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -160,6 +160,35 @@ test("GET /work lists items", async () => {
   assert.equal(r.status, 200);
   assert.ok(Array.isArray(r.body.items));
   assert.ok(r.body.items.length > 0);
+});
+
+test("GET /events returns newest raw ledger events with a bounded limit", async () => {
+  const created = await req("POST", "/work", { project: "events", title: "event source" });
+  const id = created.body.created.id;
+  await req("POST", `/work/${id}/state`, { epoch: 0, next_action: "inspect raw detail" });
+
+  const response = await req("GET", "/events?limit=2");
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.events.length, 2);
+  assert.deepEqual(
+    Object.keys(response.body.events[0]).sort(),
+    ["at", "detail", "id", "kind", "work_item_id"],
+  );
+  assert.equal(response.body.events[0].kind, "state");
+  assert.match(response.body.events[0].detail, /next_action=inspect raw detail/);
+  assert.ok(response.body.events[0].id > response.body.events[1].id);
+});
+
+test("GET /events rejects invalid limits and caps the accepted range", async () => {
+  for (const path of ["/events?limit=0", "/events?limit=101", "/events?limit=oops"]) {
+    const response = await req("GET", path);
+    assert.equal(response.status, 400, path);
+  }
+
+  const response = await req("GET", "/events");
+  assert.equal(response.status, 200);
+  assert.ok(response.body.events.length <= 30);
 });
 
 test("GET /portfolio returns attention-first briefing", async () => {
