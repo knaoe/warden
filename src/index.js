@@ -14,7 +14,9 @@ const httpUrl = z.string().max(2048).url().refine((value) => {
   return protocol === "http:" || protocol === "https:";
 }, { message: "external_url must use http or https" });
 
+const workIdSchema = z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
 const createSchema = z.object({
+  id: workIdSchema.optional(),
   project: z.string().min(1).max(80),
   title: z.string().min(1).max(200),
   priority: z.number().int().min(0).max(1000).optional(),
@@ -27,6 +29,25 @@ const claimSchema = z.object({
 const eventsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30),
 });
+const stateListSchema = z.string().refine(
+  (v) => v === "all" || v.split(",").map((s) => s.trim()).every((s) => STATES.includes(s)),
+  { message: `state must be "all" or a comma-separated list of: ${STATES.join(", ")}` },
+);
+const workQuerySchema = z.object({
+  project: z.string().min(1).max(80).optional(),
+  state: stateListSchema.optional(),
+  include_done: z.coerce.boolean().optional(),
+});
+const portfolioQuerySchema = z.object({
+  project: z.string().min(1).max(80).optional(),
+});
+
+// NULL/absent allowed_projects means the account is unrestricted (back-compat
+// for existing accounts like `board`/`demo`).
+function projectAllowed(allowedProjects, project) {
+  if (!allowedProjects) return true;
+  return allowedProjects.split(",").map((p) => p.trim()).filter(Boolean).includes(project);
+}
 // Partial update: only fields present in the request are written. Omitted
 // fields keep their current values; an explicit null clears a text field.
 const stateSchema = z
@@ -54,6 +75,7 @@ app.use("*", async (c, next) => {
   const r = await authenticate(c);
   if (!r.ok) return c.json({ error: "unauthorized", reason: r.reason }, r.status);
   c.set("identity", r.identity);
+  c.set("allowedProjects", r.allowedProjects);
   await next();
 });
 
@@ -65,39 +87,81 @@ app.get("/", (c) =>
     auth: "Ed25519 request signature: X-Warden-Account / X-Warden-Timestamp / X-Warden-Signature",
   }));
 
-// Attention-first portfolio briefing ("how is everything?").
-app.get("/portfolio", async (c) => {
+// Attention-first portfolio briefing ("how is everything?"). Unscoped (no
+// ?project=) is a genuinely useful cross-team overview; scoped keeps one
+// busy project's items from crowding out every other project's top-3.
+app.get("/portfolio", zValidator("query", portfolioQuerySchema), async (c) => {
+  const { project } = c.req.valid("query");
   const db = c.env.DB;
-  const counts = (await db.prepare(`SELECT state, COUNT(*) AS n FROM work_items GROUP BY state`).all()).results;
+  const projectFilter = project ? "WHERE project = ?" : "";
+  const projectAndFilter = project ? "AND project = ?" : "";
+  const binds = project ? [project] : [];
+
+  const counts = (await db.prepare(`SELECT state, COUNT(*) AS n FROM work_items ${projectFilter} GROUP BY state`).bind(...binds).all()).results;
   const needs_you = (await db.prepare(
     `SELECT id, project, title, next_action FROM work_items
-      WHERE state='needs_you' OR needs_you=1 ORDER BY priority LIMIT 3`).all()).results;
+      WHERE (state='needs_you' OR needs_you=1) ${projectAndFilter} ORDER BY priority LIMIT 3`).bind(...binds).all()).results;
   const running = (await db.prepare(
     `SELECT id, project, title, owner, owner_epoch FROM work_items
-      WHERE state='running' ORDER BY priority`).all()).results;
+      WHERE state='running' ${projectAndFilter} ORDER BY priority`).bind(...binds).all()).results;
   const recent = (await db.prepare(
     `SELECT id, project, title, state, updated_at FROM work_items
-      ORDER BY updated_at DESC LIMIT 5`).all()).results;
+      ${projectFilter} ORDER BY updated_at DESC LIMIT 5`).bind(...binds).all()).results;
   return c.json({ reconciled_at: new Date().toISOString(), counts, needs_you, running, recent_changes: recent });
 });
 
-// Create a typed work item.
+// Create a typed work item. A client-supplied `id` makes this idempotent:
+// retrying after an ambiguous response (the README documents at-least-once
+// writes) is a safe no-op that returns the already-created row instead of
+// erroring on the duplicate key.
 app.post("/work", zValidator("json", createSchema), async (c) => {
   const db = c.env.DB;
   const b = c.req.valid("json");
-  const id = crypto.randomUUID().slice(0, 8);
-  await db.prepare(
-    `INSERT INTO work_items (id, project, title, priority, next_action, state)
-     VALUES (?, ?, ?, ?, ?, 'queued')`)
-    .bind(id, b.project, b.title, b.priority ?? 100, b.next_action ?? null).run();
+  if (!projectAllowed(c.get("allowedProjects"), b.project))
+    return c.json({ error: "forbidden_project" }, 403);
+
+  const id = b.id ?? crypto.randomUUID().slice(0, 8);
+  if (b.id) {
+    const existing = (await db.prepare(`SELECT * FROM work_items WHERE id=?`).bind(id).all()).results[0];
+    if (existing) return c.json({ created: existing });
+  }
+  try {
+    await db.prepare(
+      `INSERT INTO work_items (id, project, title, priority, next_action, state)
+       VALUES (?, ?, ?, ?, ?, 'queued')`)
+      .bind(id, b.project, b.title, b.priority ?? 100, b.next_action ?? null).run();
+  } catch (err) {
+    if (b.id && /unique/i.test(String(err?.message))) {
+      const existing = (await db.prepare(`SELECT * FROM work_items WHERE id=?`).bind(id).all()).results[0];
+      if (existing) return c.json({ created: existing });
+    }
+    throw err;
+  }
   await db.prepare(`INSERT INTO events (work_item_id, kind, detail) VALUES (?, 'created', ?)`)
     .bind(id, `${b.title} by=${c.get("identity")}`).run();
   const item = (await db.prepare(`SELECT * FROM work_items WHERE id=?`).bind(id).all()).results[0];
   return c.json({ created: item });
 });
 
-app.get("/work", async (c) => {
-  const items = (await c.env.DB.prepare(`SELECT * FROM work_items ORDER BY priority, updated_at DESC`).all()).results;
+// Defaults to excluding `done` items so board payloads don't grow unbounded;
+// `?state=all` or `?include_done=true` opts back into the full ledger (e.g. audit views).
+app.get("/work", zValidator("query", workQuerySchema), async (c) => {
+  const { project, state, include_done } = c.req.valid("query");
+  const conditions = [];
+  const binds = [];
+  if (project) { conditions.push("project = ?"); binds.push(project); }
+  if (state && state !== "all") {
+    const states = state.split(",").map((s) => s.trim());
+    conditions.push(`state IN (${states.map(() => "?").join(", ")})`);
+    binds.push(...states);
+  } else if (!state && !include_done) {
+    conditions.push("state != ?");
+    binds.push("done");
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const items = (await c.env.DB.prepare(
+    `SELECT * FROM work_items ${where} ORDER BY priority, updated_at DESC`,
+  ).bind(...binds).all()).results;
   return c.json({ items });
 });
 
@@ -115,6 +179,9 @@ app.post("/work/:id/claim", zValidator("json", claimSchema), async (c) => {
   const db = c.env.DB;
   const id = c.req.param("id");
   const { owner, epoch } = c.req.valid("json");
+  const target = (await db.prepare(`SELECT project FROM work_items WHERE id=?`).bind(id).all()).results[0];
+  if (target && !projectAllowed(c.get("allowedProjects"), target.project))
+    return c.json({ error: "forbidden_project" }, 403);
   const leaseUntil = new Date(Date.now() + 120000).toISOString();
   const res = await db.prepare(
     `UPDATE work_items
@@ -136,6 +203,9 @@ app.post("/work/:id/state", zValidator("json", stateSchema), async (c) => {
   const db = c.env.DB;
   const id = c.req.param("id");
   const b = c.req.valid("json");
+  const target = (await db.prepare(`SELECT project FROM work_items WHERE id=?`).bind(id).all()).results[0];
+  if (target && !projectAllowed(c.get("allowedProjects"), target.project))
+    return c.json({ error: "forbidden_project" }, 403);
   const sets = [];
   const binds = [];
   for (const [col, val] of Object.entries({

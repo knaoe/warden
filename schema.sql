@@ -33,5 +33,6 @@ CREATE TABLE IF NOT EXISTS service_accounts (
   id TEXT PRIMARY KEY,
   pubkey TEXT NOT NULL,                       -- base64 of the raw 32-byte ed25519 public key
   disabled INTEGER NOT NULL DEFAULT 0,
+  allowed_projects TEXT,                      -- comma-separated project names; NULL = unrestricted (all projects)
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
