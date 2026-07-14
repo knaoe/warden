@@ -43,7 +43,7 @@ export async function authenticate(c) {
     return { ok: false, status: 401, reason: "timestamp_out_of_window" };
 
   const row = await c.env.DB
-    .prepare("SELECT id, pubkey FROM service_accounts WHERE id = ? AND disabled = 0")
+    .prepare("SELECT id, pubkey, allowed_projects FROM service_accounts WHERE id = ? AND disabled = 0")
     .bind(account).first();
   if (!row) return { ok: false, status: 401, reason: "unknown_or_disabled_account" };
 
@@ -53,5 +53,5 @@ export async function authenticate(c) {
 
   if (!(await verifyEd25519(row.pubkey, sig, message)))
     return { ok: false, status: 401, reason: "bad_signature" };
-  return { ok: true, identity: account };
+  return { ok: true, identity: account, allowedProjects: row.allowed_projects };
 }

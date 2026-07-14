@@ -36,19 +36,29 @@ after(async () => {
 });
 
 // Signs per src/auth.js's canonical message: "v1\n<METHOD>\n<path+query>\n<unix-ts>\n<sha256hex(body)>"
-function authHeaders(method, path, body) {
+function authHeaders(method, path, body, account = ACCOUNT, key = privateKey) {
   const ts = Math.floor(Date.now() / 1000).toString();
   const bodyHash = createHash("sha256").update(body, "utf8").digest("hex");
   const message = ["v1", method, path, ts, bodyHash].join("\n");
-  const sigB64 = sign(null, Buffer.from(message), privateKey).toString("base64");
-  return { "X-Warden-Account": ACCOUNT, "X-Warden-Timestamp": ts, "X-Warden-Signature": sigB64 };
+  const sigB64 = sign(null, Buffer.from(message), key).toString("base64");
+  return { "X-Warden-Account": account, "X-Warden-Timestamp": ts, "X-Warden-Signature": sigB64 };
 }
 
-async function req(method, path, body) {
+async function req(method, path, body, account, key) {
   const bodyStr = body !== undefined ? JSON.stringify(body) : "";
-  const headers = { "content-type": "application/json", ...authHeaders(method, path, bodyStr) };
+  const headers = { "content-type": "application/json", ...authHeaders(method, path, bodyStr, account, key) };
   const res = await app.request(path, { method, headers, body: body !== undefined ? bodyStr : undefined }, env);
   return { status: res.status, body: await res.json() };
+}
+
+// Registers a new service account with an optional allowed_projects
+// restriction and returns { account, key } for use with req(..., account, key).
+async function registerAccount(id, allowedProjects) {
+  const { publicKey, privateKey: key } = generateKeyPairSync("ed25519");
+  const pubB64 = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("base64");
+  await env.DB.prepare(`INSERT INTO service_accounts (id, pubkey, allowed_projects) VALUES (?, ?, ?)`)
+    .bind(id, pubB64, allowedProjects ?? null).run();
+  return { account: id, key };
 }
 
 test("unauthenticated request is rejected 401", async () => {
@@ -201,4 +211,105 @@ test("GET /portfolio returns attention-first briefing", async () => {
   assert.ok(Array.isArray(r.body.counts));
   assert.ok(Array.isArray(r.body.needs_you));
   assert.ok(r.body.needs_you.some((i) => i.id === created.body.created.id));
+});
+
+test("GET /work?project= filters to the requested project", async () => {
+  const a = await req("POST", "/work", { project: "proj-a", title: "a item" });
+  const b = await req("POST", "/work", { project: "proj-b", title: "b item" });
+
+  const r = await req("GET", "/work?project=proj-a");
+  assert.equal(r.status, 200);
+  assert.ok(r.body.items.some((i) => i.id === a.body.created.id));
+  assert.ok(!r.body.items.some((i) => i.id === b.body.created.id));
+});
+
+test("GET /work excludes done items by default and ?state=all / ?include_done=true opt back in", async () => {
+  const created = await req("POST", "/work", { project: "done-proj", title: "finish-me" });
+  const id = created.body.created.id;
+  await req("POST", `/work/${id}/state`, { epoch: 0, state: "done" });
+
+  const defaultList = await req("GET", "/work?project=done-proj");
+  assert.ok(!defaultList.body.items.some((i) => i.id === id));
+
+  const withAll = await req("GET", "/work?project=done-proj&state=all");
+  assert.ok(withAll.body.items.some((i) => i.id === id));
+
+  const withIncludeDone = await req("GET", "/work?project=done-proj&include_done=true");
+  assert.ok(withIncludeDone.body.items.some((i) => i.id === id));
+});
+
+test("GET /work?state= filters to a comma-separated state list", async () => {
+  const created = await req("POST", "/work", { project: "state-filter", title: "block-me" });
+  const id = created.body.created.id;
+  await req("POST", `/work/${id}/state`, { epoch: 0, state: "blocked", blocked_reason: "waiting" });
+
+  const r = await req("GET", "/work?project=state-filter&state=blocked,queued");
+  assert.equal(r.status, 200);
+  assert.ok(r.body.items.some((i) => i.id === id));
+
+  const invalid = await req("GET", "/work?state=not-a-real-state");
+  assert.equal(invalid.status, 400);
+});
+
+test("GET /portfolio?project= scopes every query to the requested project", async () => {
+  const scoped = await req("POST", "/work", { project: "portfolio-scope", title: "scoped-needs-you" });
+  await req("POST", `/work/${scoped.body.created.id}/state`, { epoch: 0, state: "needs_you", needs_you: true });
+  const other = await req("POST", "/work", { project: "other-project", title: "other-needs-you" });
+  await req("POST", `/work/${other.body.created.id}/state`, { epoch: 0, state: "needs_you", needs_you: true });
+
+  const r = await req("GET", "/portfolio?project=portfolio-scope");
+  assert.equal(r.status, 200);
+  assert.ok(r.body.needs_you.some((i) => i.id === scoped.body.created.id));
+  assert.ok(!r.body.needs_you.some((i) => i.id === other.body.created.id));
+  assert.ok(r.body.recent_changes.every((i) => i.project === "portfolio-scope"));
+});
+
+test("POST /work with a client-supplied id is idempotent — a retried call is a safe no-op", async () => {
+  const first = await req("POST", "/work", { id: "idem-1", project: "p", title: "idempotent item" });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.created.id, "idem-1");
+
+  const retry = await req("POST", "/work", { id: "idem-1", project: "p", title: "idempotent item" });
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.created.id, "idem-1");
+
+  const list = await req("GET", "/work?project=p&state=all");
+  assert.equal(list.body.items.filter((i) => i.id === "idem-1").length, 1);
+});
+
+test("POST /work rejects an invalid client-supplied id shape", async () => {
+  const r = await req("POST", "/work", { id: "../bad id", project: "p", title: "bad id" });
+  assert.equal(r.status, 400);
+});
+
+test("allowed_projects restricts a service account to its own projects", async () => {
+  const restricted = await registerAccount("restricted-acct", "allowed-proj");
+
+  const ok = await req("POST", "/work", { project: "allowed-proj", title: "in scope" }, restricted.account, restricted.key);
+  assert.equal(ok.status, 200);
+
+  const forbidden = await req("POST", "/work", { project: "other-proj", title: "out of scope" }, restricted.account, restricted.key);
+  assert.equal(forbidden.status, 403);
+  assert.equal(forbidden.body.error, "forbidden_project");
+});
+
+test("allowed_projects is enforced on claim and state routes using the target item's own project", async () => {
+  const restricted = await registerAccount("restricted-acct-2", "in-scope-proj");
+  const outOfScope = await req("POST", "/work", { project: "not-in-scope-proj", title: "not mine" });
+  const id = outOfScope.body.created.id;
+
+  const claim = await req("POST", `/work/${id}/claim`, { owner: "pm:x", epoch: 1 }, restricted.account, restricted.key);
+  assert.equal(claim.status, 403);
+  assert.equal(claim.body.error, "forbidden_project");
+
+  const state = await req("POST", `/work/${id}/state`, { epoch: 0, state: "blocked" }, restricted.account, restricted.key);
+  assert.equal(state.status, 403);
+  assert.equal(state.body.error, "forbidden_project");
+});
+
+test("NULL allowed_projects remains unrestricted (back-compat for existing accounts)", async () => {
+  const unrestricted = await registerAccount("unrestricted-acct");
+
+  const r = await req("POST", "/work", { project: "any-project-at-all", title: "unrestricted" }, unrestricted.account, unrestricted.key);
+  assert.equal(r.status, 200);
 });
