@@ -1,0 +1,35 @@
+name: Deploy warden
+
+# Deploys the Worker (src/**) on every push to main. Deliberately does NOT
+# run D1 migrations here -- schema changes stay a manual, reviewed step
+# (see README's "Production migration warning") since a bad migration is
+# much harder to undo than a bad Worker deploy (which is just another push).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "wrangler.toml"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+
+      - run: npm test
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
