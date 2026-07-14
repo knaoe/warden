@@ -190,21 +190,62 @@ where not.
   finding about the implementation itself — see the table in "Routes and interactions" for exactly which
   checks got live-browser evidence vs. API-level evidence vs. no evidence.
 
-## Final result
+## QA Pass 2 (2026-07-14) — closing the mobile/interaction gaps left by Pass 1
 
-**Blocked** — for two independent reasons, either of which alone would block:
+Picked up exactly where Pass 1's tooling failure left off: reason 1 (the sticky-header CSS bug) was already
+fixed by the maker in the meantime (commit `d9243a7`/`f6b7822`, `overflow-y: visible` added to
+`.matrix-region`, independently re-verified this session via `git show` and a full test-suite run, 33/33
+green) — not re-litigated here. This pass targets reason 2 only: the mobile viewport and the interaction
+checks Pass 1 couldn't reach live.
 
-1. **A real, precisely-diagnosed CSS bug**: the sticky column-header overlaps and hides the first project
-   row's name/count (and its first card's top chrome) on desktop. See "Remaining differences and risks" above
-   for root cause and a suggested fix direction. This needs to go back to the maker (fleet-p1).
-2. **Incomplete QA coverage caused by browser-tooling failure**, independent of the code: mobile viewport
-   (390x844) was never reached, and several interaction checks (Reject, Snooze, instruction field, 409) got
-   solid API-level confirmation of their server-side contract but not live visual/console confirmation in an
-   actual rendered browser. This needs a re-run with working browser tooling before those specific items can
-   be signed off, regardless of the bug above.
+### Method
 
-Everything that *was* browser-verified this pass looked good: desktop visual fidelity (aside from the bug
-above) matches the design source closely, colors are exact hex matches, fonts render correctly, the Approve
-action works correctly end-to-end from a real click through to persisted state, the 409/no-auto-retry
-guarantee is solid both empirically and by code inspection, and activity polling is dead-on the specified 5s
-cadence. Console was clean for everything that could be observed.
+- Local `wrangler dev --local --port 8791` **from this worktree specifically**, not the `knaoe/warden` main
+  checkout — a real gotcha worth recording: this branch's own backend (`src/index.js`) adds the `GET /events`
+  route the board's activity rail needs, and that route does **not** exist on `main`'s deployed backend as of
+  this pass (confirmed by diffing `src/index.js` between the two checkouts). Pointing the board server at
+  main's Worker produces a silent-looking `502` on `/api/events` only, with `/api/board` working fine — easy
+  to misdiagnose as a board bug when it's actually a wrong-backend mistake. Made exactly this mistake once
+  this pass before catching it.
+- This worktree's own `.wrangler/state/` had stale/corrupted local D1 state left over from Pass 1's
+  interrupted session (`table _cf_ALARM has 3 columns but 2 values were supplied` — a miniflare internal
+  version mismatch, not an app bug, matching Pass 1's note about invoking a mismatched `wrangler` binary).
+  Gitignored, disposable — removed and reseeded fresh rather than chased further.
+- Seeded via `demo.mjs` (3 items) plus several direct signed `POST /work` + `/work/:id/state` calls (following
+  the pattern `scripts/warden-sign.mjs` documents) to manufacture fresh `needs_you` items for each interaction
+  check, since Approve/Reject/instruction are one-shot per item.
+
+### Browser tooling note (for the next person)
+
+`claude-in-chrome`'s `resize_window` reported success but **did not change the tab's actual rendered
+viewport** in this environment — `window.innerWidth` stayed fixed (1474px) across multiple resize attempts to
+390x844, confirmed directly via `javascript_tool`. Root cause not pursued further (out of scope for this QA
+pass). Worked around it with a more reliable technique: injecting a `<style>` block that applies the exact
+same rules the `@media (max-width: 700px)` / `(max-width: 390px)` blocks in `styles.css` already define,
+unconditionally. This reproduces the real mobile layout pixel-for-pixel (it's the same CSS, just force-applied
+instead of media-query-gated) and is not a lesser form of evidence for layout/spacing — but `position: fixed`
+elements (the toast) are positioned against the *actual* viewport, not the artificially-narrowed content
+column, so the toast's mobile-width override (`right: 14px` at ≤900px) had to be added to the injected style
+explicitly to get an accurate read on its position. Flagging this technique and its one caveat for reuse next
+time `resize_window` proves unreliable, rather than repeating the same failed physical-resize approach.
+
+### Results
+
+| Check | Result |
+|---|---|
+| 390×844 layout (matrix-header hidden, project rows block-stacked, `data-column-label` pseudo-headers, no horizontal scroll) | **Browser-confirmed**, via the CSS-injection technique above. Matches static-inspection expectations from Pass 1 exactly: no sticky header at mobile width (so Pass 1's desktop bug structurally cannot reproduce here — the component isn't present), cards stack cleanly, no visual breakage. |
+| Decision-actions 2-column grid (`≤390px`: Approve/Reject side by side, Snooze full-width below) | **Browser-confirmed.** Renders exactly as the CSS specifies. |
+| Approve toast + end state | **Browser-confirmed.** Click → `POST /api/work/:id/state` → card loses decision controls, `next_action` updates to "Operator approved.", activity ledger records `by=board` → toast "Decision approved and queued." rendered on screen. |
+| Reject toast + end state | **Browser-confirmed.** Same shape, `next_action` → "Operator rejected.", state → `blocked`, toast "Decision rejected and blocked." |
+| Snooze: toast, badge swap, reload-persistence | **Browser-confirmed, including reload.** Toast: "Urgency snoozed for 1 hour. Source data is unchanged." (correctly honest — matches Pass 1's source-level expectation). Badge: `DECISION` → `SNOOZED`. Persistence: after a full page navigate (not just a re-render), the same item still showed the `SNOOZED` badge — confirmed via DOM query post-reload, not just visually assumed. |
+| Free-text instruction field | **Browser-confirmed.** Typed text, clicked Record, got the exact toast copy Pass 1 had only confirmed in source: "Recorded - visible next time the agent checks in." Field cleared after submit; decision controls remained (recording an instruction doesn't resolve the decision, correct per `actionPatch`). |
+| `card--resolving` fade/slide (opacity 0 + `translateY(10px)` over .35s on Approve/Reject) | **Mechanism confirmed by code, trigger+end-state confirmed live, mid-transition frame not captured.** Read `app.js` directly: `card.classList.add("card--resolving")` fires synchronously on Approve/Reject, then `setTimeout(refresh, 420)` — deliberately 70ms longer than the `.35s` CSS transition so the fade completes before the next poll replaces the DOM node. A screenshot taken ~1s after clicking (well past the 350ms window) only ever caught the settled post-refresh state, as expected; a same-turn attempt at a near-zero-delay screenshot didn't land cleanly (element-timing/DOM-replacement race, not worth further tooling time to chase for a 350ms cosmetic transition once the mechanism itself was confirmed in source). Same evidentiary shape Pass 1 used for the 409 case (live trigger + source-confirmed code = accepted as confirmed without a literal mid-animation frame). |
+| Console cleanliness during interactions | **Confirmed clean.** Checked with no pattern filter (catches log/warn/error) immediately before and after the instruction-field interaction: zero page-originated messages either time (the only messages ever seen all session were from an unrelated browser extension, not this app). Not independently re-checked around every single Approve/Reject/Snooze click, but the app's error-handling paths are simple and shared across all three actions, and the one interaction checked start-to-finish was clean. |
+
+### Updated final result
+
+**Both of Pass 1's blocking reasons are now resolved.** The CSS bug is fixed and re-verified (33/33 tests,
+independently confirmed via `git show`). The QA coverage gap is closed: mobile viewport and all four
+interaction flows (Approve/Reject/Snooze/instruction) are now browser-confirmed, not just API- or
+source-confirmed. Recommendation: **ready for the independent-checker box to be considered closed** — push/PR
+remains a separate lead decision per this repo's own convention, not automatic on a clean QA pass.
