@@ -3,23 +3,38 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-    <meta name="theme-color" content="#131c2b">
-    <meta name="description" content="Attention-first view of the warden coordination ledger">
+    <meta name="theme-color" content="#07090f">
+    <meta name="description" content="Fleet agent operations view of the warden coordination ledger">
     <link rel="icon" href="/icons/vigil-favicon-mono.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.json">
     <link rel="stylesheet" href="/styles.css">
-    <title>Vigil — Coordination Board</title>
+    <title>Fleet — Agent Ops</title>
   </head>
   <body>
     <header class="masthead">
       <div class="brand">
-        <img src="/icons/vigil-appicon.svg" alt="" width="46" height="46">
-        <div><p class="eyebrow">WARDEN COORDINATION</p><h1>Vigil</h1></div>
+        <img src="/icons/vigil-appicon.svg" alt="" width="30" height="30">
+        <div>
+          <p><strong>Fleet</strong> <span>/ agent ops</span></p>
+          <small>WARDEN COORDINATION</small>
+        </div>
       </div>
-      <div class="health" aria-live="polite"><span id="status">Connecting</span><small id="refreshed">Waiting for ledger</small></div>
+      <div class="health" aria-live="polite">
+        <span id="status">Connecting</span>
+        <small id="refreshed">Waiting for ledger</small>
+      </div>
     </header>
-    <main id="board" class="board" aria-live="polite"></main>
-    <noscript>Vigil needs JavaScript to refresh the live coordination ledger.</noscript>
+    <main class="dashboard">
+      <section class="matrix-region" aria-label="Work by project and status">
+        <div id="board" class="matrix" aria-live="polite"></div>
+      </section>
+      <aside class="activity-rail" aria-label="Ledger activity">
+        <header><span>ACTIVITY</span><small>RAW LEDGER · LIVE</small></header>
+        <div id="activity" class="activity-list" aria-live="polite"></div>
+      </aside>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
+    <noscript>Fleet needs JavaScript to refresh the coordination ledger.</noscript>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

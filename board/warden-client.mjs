@@ -16,20 +16,44 @@ export function createWardenClient({ baseUrl, account, keyFile, fetchImpl = fetc
     };
   }
 
-  async function get(pathAndQuery) {
+  async function request(method, pathAndQuery, payload) {
     const url = new URL(pathAndQuery, endpoint);
     const path = url.pathname + url.search;
+    const body = payload === undefined ? "" : JSON.stringify(payload);
     const response = await fetchImpl(url.toString(), {
-      method: "GET",
-      headers: signedHeaders("GET", path),
+      method,
+      headers: {
+        ...signedHeaders(method, path, body),
+        ...(payload === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(payload === undefined ? {} : { body }),
     });
+    const responseText = await response.text();
+    let responseBody;
+    try {
+      responseBody = responseText ? JSON.parse(responseText) : {};
+    } catch {
+      responseBody = { error: "warden_error" };
+    }
+    return { status: response.status, ok: response.ok, body: responseBody };
+  }
+
+  async function get(pathAndQuery) {
+    const response = await request("GET", pathAndQuery);
     if (!response.ok) throw new Error(`warden HTTP ${response.status}`);
-    return response.json();
+    return response.body;
   }
 
   return {
     listWork(query = "") {
       return get(`/work${query}`);
+    },
+    listEvents(limit = 30) {
+      return get(`/events?limit=${encodeURIComponent(limit)}`);
+    },
+    async updateWorkState(id, patch) {
+      const response = await request("POST", `/work/${encodeURIComponent(id)}/state`, patch);
+      return { status: response.status, body: response.body };
     },
   };
 }

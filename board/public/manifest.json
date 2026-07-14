@@ -1,12 +1,12 @@
 {
-  "name": "Vigil Coordination Board",
-  "short_name": "Vigil",
-  "description": "Attention-first view of the warden coordination ledger",
+  "name": "Fleet Agent Ops",
+  "short_name": "Fleet",
+  "description": "Fleet operations view of the warden coordination ledger",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#131c2b",
-  "theme_color": "#131c2b",
+  "background_color": "#05070c",
+  "theme_color": "#07090f",
   "icons": [
     { "src": "/icons/vigil-appicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]

@@ -24,6 +24,9 @@ const claimSchema = z.object({
   owner: z.string().min(1).max(120),
   epoch: z.number().int().nonnegative(),
 });
+const eventsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(30),
+});
 // Partial update: only fields present in the request are written. Omitted
 // fields keep their current values; an explicit null clears a text field.
 const stateSchema = z
@@ -58,7 +61,7 @@ app.get("/", (c) =>
   c.json({
     ok: true,
     service: "warden",
-    endpoints: ["GET /portfolio", "POST /work", "GET /work", "POST /work/:id/claim", "POST /work/:id/state"],
+    endpoints: ["GET /portfolio", "POST /work", "GET /work", "GET /events", "POST /work/:id/claim", "POST /work/:id/state"],
     auth: "Ed25519 request signature: X-Warden-Account / X-Warden-Timestamp / X-Warden-Signature",
   }));
 
@@ -96,6 +99,14 @@ app.post("/work", zValidator("json", createSchema), async (c) => {
 app.get("/work", async (c) => {
   const items = (await c.env.DB.prepare(`SELECT * FROM work_items ORDER BY priority, updated_at DESC`).all()).results;
   return c.json({ items });
+});
+
+app.get("/events", zValidator("query", eventsQuerySchema), async (c) => {
+  const { limit } = c.req.valid("query");
+  const events = (await c.env.DB.prepare(
+    `SELECT id, work_item_id, kind, detail, at FROM events ORDER BY id DESC LIMIT ?`,
+  ).bind(limit).all()).results;
+  return c.json({ events });
 });
 
 // Claim with a fencing token: succeeds only if epoch > stored owner_epoch

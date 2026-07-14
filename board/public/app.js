@@ -1,17 +1,22 @@
-import { buildBoardModel } from "./board-view.js";
+import {
+  buildActivityModel,
+  buildBoardModel,
+  CONFLICT_MESSAGE,
+  createActionRequest,
+  isDecisionSnoozed,
+  relativeTime,
+  snoozeDecision,
+  STATUS_COLUMNS,
+} from "./board-view.js";
+import { createPollingController } from "./polling.js";
 
-const POLL_MS = 10_000;
 const board = document.querySelector("#board");
+const activity = document.querySelector("#activity");
 const status = document.querySelector("#status");
 const refreshed = document.querySelector("#refreshed");
-let pollTimer;
-
-const laneDefinitions = [
-  ["needsYou", "NEEDS YOU", "Waiting for Ken", "attention"],
-  ["blocked", "BLOCKED", "Stopped by a concrete dependency", "blocked"],
-  ["running", "RUNNING", "Queued, running, or being verified", "active"],
-  ["recent", "RECENT CHANGES", "Latest ledger updates", "recent"],
-];
+const toast = document.querySelector("#toast");
+let toastTimer;
+let currentItems = [];
 
 function text(tag, value, className) {
   const element = document.createElement(tag);
@@ -30,81 +35,184 @@ function safeExternalUrl(value) {
   }
 }
 
-function relativeTime(value) {
-  const time = Date.parse(value);
-  if (!Number.isFinite(time)) return "Unknown update time";
-  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
+function showToast(message, tone = "success") {
+  clearTimeout(toastTimer);
+  toast.textContent = message;
+  toast.dataset.tone = tone;
+  toast.hidden = false;
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 4_500);
 }
 
-function cardFor(item, tone) {
-  const card = document.createElement("article");
-  card.className = `card card--${tone}`;
-  const top = document.createElement("div");
-  top.className = "card__top";
-  top.append(text("span", item.project || "Unassigned project", "eyebrow"));
-  top.append(text("span", relativeTime(item.updated_at), "timestamp"));
-  card.append(top, text("h3", item.title || "Untitled work"));
+async function postAction(item, action, instruction, card) {
+  const response = await fetch(`/api/work/${encodeURIComponent(item.id)}/state`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(createActionRequest(item, action, instruction)),
+  });
+  if (response.status === 409) {
+    showToast(CONFLICT_MESSAGE, "error");
+    return false;
+  }
+  if (!response.ok) {
+    showToast("Action was not recorded. Try again.", "error");
+    return false;
+  }
+  if (action === "instruction") {
+    showToast("Recorded - visible next time the agent checks in.");
+    return true;
+  }
+  card.classList.add("card--resolving");
+  showToast(action === "approve" ? "Decision approved and queued." : "Decision rejected and blocked.");
+  setTimeout(refresh, 420);
+  return true;
+}
 
+function factsFor(item) {
   const facts = document.createElement("div");
   facts.className = "facts";
-  facts.append(text("span", item.state || "unknown", "pill"));
-  if (item.assignee) facts.append(text("span", `@${item.assignee}`, "pill pill--quiet"));
-  if (item.gate_status && item.gate_status !== "none") facts.append(text("span", `gate: ${item.gate_status}`, "pill pill--quiet"));
-  card.append(facts);
+  if (item.assignee) facts.append(text("span", `@${item.assignee}`, "pill"));
+  else if (item.owner) facts.append(text("span", item.owner, "pill"));
+  if (item.gate_status && item.gate_status !== "none") facts.append(text("span", `gate ${item.gate_status}`, "pill pill--violet"));
+  facts.append(text("span", `P${item.priority ?? 100}`, "pill pill--quiet"));
+  return facts;
+}
 
+function decisionControls(item, card) {
+  const wrap = document.createElement("div");
+  wrap.className = "decision-controls";
+  const actions = document.createElement("div");
+  actions.className = "decision-actions";
+  const approve = text("button", "Approve", "button button--approve");
+  const reject = text("button", "Reject", "button button--reject");
+  const snooze = text("button", "Snooze 1h", "button button--snooze");
+  approve.type = reject.type = snooze.type = "button";
+  approve.addEventListener("click", () => postAction(item, "approve", "", card));
+  reject.addEventListener("click", () => postAction(item, "reject", "", card));
+  snooze.addEventListener("click", () => {
+    snoozeDecision(localStorage, item);
+    renderBoard(currentItems);
+    showToast("Urgency snoozed for 1 hour. Source data is unchanged.");
+  });
+  actions.append(approve, reject, snooze);
+
+  const instruction = document.createElement("form");
+  instruction.className = "instruction";
+  const input = document.createElement("input");
+  input.name = "instruction";
+  input.maxLength = 500;
+  input.required = true;
+  input.placeholder = "Record instruction in ledger…";
+  input.setAttribute("aria-label", `Instruction for ${item.title || item.id}`);
+  const send = text("button", "Record", "button button--record");
+  send.type = "submit";
+  instruction.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const value = input.value.trim();
+    if (!value) return;
+    input.disabled = send.disabled = true;
+    const ok = await postAction(item, "instruction", value, card);
+    if (ok) input.value = "";
+    input.disabled = send.disabled = false;
+  });
+  instruction.append(input, send);
+  wrap.append(actions, instruction);
+  return wrap;
+}
+
+function cardFor(item, column) {
+  const card = document.createElement("article");
+  const snoozed = column === "needsUser" && isDecisionSnoozed(localStorage, item);
+  card.className = `card card--${column}${snoozed ? " card--snoozed" : ""}`;
+  card.dataset.workId = item.id;
+  const top = document.createElement("div");
+  top.className = "card__top";
+  top.append(text("span", item.id || "NO-ID", "work-id"));
+  if (column === "needsUser") top.append(text("span", snoozed ? "SNOOZED" : "DECISION", `decision-badge${snoozed ? " decision-badge--snoozed" : ""}`));
+  top.append(text("span", relativeTime(item.updated_at), "timestamp"));
+  card.append(top, text("h3", item.title || "Untitled work"));
+  card.append(factsFor(item));
   if (item.blocked_reason) card.append(text("p", item.blocked_reason, "detail detail--blocked"));
   if (item.next_action) card.append(text("p", item.next_action, "detail"));
   const href = safeExternalUrl(item.external_url);
   if (href) {
-    const link = text("a", "Open related work ↗", "external-link");
+    const link = text("a", "Open related work", "external-link");
     link.href = href;
     link.target = "_blank";
     link.rel = "noreferrer noopener";
     card.append(link);
   }
+  if (column === "needsUser") card.append(decisionControls(item, card));
   return card;
 }
 
-function laneFor(key, title, subtitle, tone, items) {
-  const section = document.createElement("section");
-  section.className = `lane lane--${tone}`;
-  const heading = document.createElement("header");
-  heading.className = "lane__heading";
-  const titleRow = document.createElement("div");
-  titleRow.className = "lane__title-row";
-  if (key === "needsYou") {
-    const badge = document.createElement("img");
-    badge.src = "/icons/needs-attention-badge.svg";
-    badge.alt = "";
-    titleRow.append(badge);
-  }
-  titleRow.append(text("h2", title));
-  titleRow.append(text("span", String(items.length), "count"));
-  heading.append(titleRow, text("p", subtitle));
-  section.append(heading);
+function columnCell(column, items) {
+  const cell = document.createElement("div");
+  cell.className = `matrix-cell matrix-cell--${column}${items.length ? "" : " matrix-cell--empty"}`;
+  cell.dataset.columnLabel = STATUS_COLUMNS.find(({ key }) => key === column).label;
+  if (items.length) cell.append(...items.map((item) => cardFor(item, column)));
+  else cell.append(text("span", "—", "empty-cell"));
+  return cell;
+}
 
-  const cards = document.createElement("div");
-  cards.className = "cards";
-  if (items.length === 0) cards.append(text("p", "Nothing here right now.", "empty"));
-  else cards.append(...items.map((item) => cardFor(item, tone)));
-  section.append(cards);
-  return section;
+function projectRow(project) {
+  const row = document.createElement("section");
+  row.className = "project-row";
+  const meta = document.createElement("header");
+  meta.className = "project-meta";
+  const total = Object.values(project.columns).reduce((sum, items) => sum + items.length, 0);
+  meta.append(text("h2", project.name), text("p", `${total} active ${total === 1 ? "item" : "items"}`));
+  row.append(meta, ...STATUS_COLUMNS.map(({ key }) => columnCell(key, project.columns[key])));
+  return row;
+}
+
+function renderBoard(items) {
+  currentItems = items;
+  const model = buildBoardModel(items);
+  const header = document.createElement("header");
+  header.className = "matrix-header";
+  header.append(text("span", `PROJECTS · ${model.projects.length}`));
+  for (const { key, label } of STATUS_COLUMNS) {
+    const heading = document.createElement("div");
+    heading.className = `column-heading column-heading--${key}`;
+    heading.append(text("span", label), text("strong", String(model.counts[key])));
+    header.append(heading);
+  }
+  const rows = model.projects.length ? model.projects.map(projectRow) : [text("p", "No active work right now.", "board-empty")];
+  board.replaceChildren(header, ...rows);
+}
+
+function renderActivity(events) {
+  const rows = buildActivityModel(events);
+  if (!rows.length) {
+    activity.replaceChildren(text("p", "No ledger activity yet.", "activity-empty"));
+    return;
+  }
+  activity.replaceChildren(...rows.map((event) => {
+    const row = document.createElement("article");
+    row.className = "activity-item";
+    row.append(text("p", event.kind, "activity-kind"), text("p", event.detail || "—", "activity-detail"));
+    const meta = document.createElement("p");
+    meta.className = "activity-time";
+    meta.textContent = event.workItemId ? `${event.workItemId} · ${event.relativeTime}` : event.relativeTime;
+    row.append(meta);
+    return row;
+  }));
 }
 
 async function refresh() {
   status.textContent = "Refreshing";
+  status.dataset.state = "loading";
   try {
-    const response = await fetch("/api/board", { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const snapshot = await response.json();
-    const model = buildBoardModel(snapshot.items || []);
-    board.replaceChildren(...laneDefinitions.map(([key, title, subtitle, tone]) => laneFor(key, title, subtitle, tone, model[key])));
+    const [boardResponse, eventsResponse] = await Promise.all([
+      fetch("/api/board", { cache: "no-store" }),
+      fetch("/api/events?limit=30", { cache: "no-store" }),
+    ]);
+    if (!boardResponse.ok || !eventsResponse.ok) throw new Error("upstream response failed");
+    const [snapshot, eventSnapshot] = await Promise.all([boardResponse.json(), eventsResponse.json()]);
+    renderBoard(snapshot.items || []);
+    renderActivity(eventSnapshot.events || []);
     refreshed.textContent = `Updated ${new Date(snapshot.fetched_at).toLocaleTimeString()}`;
-    status.textContent = "Live";
+    status.textContent = "Connected";
     status.dataset.state = "live";
   } catch {
     status.textContent = "Warden unavailable";
@@ -112,28 +220,14 @@ async function refresh() {
   }
 }
 
-function startPolling() {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(refresh, POLL_MS);
-}
-
-function onVisibilityChange() {
-  if (document.hidden) clearInterval(pollTimer);
-  else {
-    refresh();
-    startPolling();
-  }
-}
-
+const polling = createPollingController({ refresh });
 function cleanup() {
-  clearInterval(pollTimer);
-  document.removeEventListener("visibilitychange", onVisibilityChange);
+  polling.cleanup();
+  clearTimeout(toastTimer);
   window.removeEventListener("pagehide", cleanup);
 }
-
-document.addEventListener("visibilitychange", onVisibilityChange);
 window.addEventListener("pagehide", cleanup);
 refresh();
-startPolling();
+polling.start();
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
