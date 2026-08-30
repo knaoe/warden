@@ -43,9 +43,11 @@ export async function authenticate(c) {
     return { ok: false, status: 401, reason: "timestamp_out_of_window" };
 
   const row = await c.env.DB
-    .prepare("SELECT id, pubkey, allowed_projects FROM service_accounts WHERE id = ? AND disabled = 0")
+    .prepare("SELECT id, pubkey, allowed_projects, expires_at, is_admin FROM service_accounts WHERE id = ? AND disabled = 0")
     .bind(account).first();
   if (!row) return { ok: false, status: 401, reason: "unknown_or_disabled_account" };
+  if (row.expires_at && Date.parse(row.expires_at) <= Date.now())
+    return { ok: false, status: 401, reason: "account_expired" };
 
   const body = await c.req.text(); // Hono caches the body so downstream validators can re-read it
   const url = new URL(c.req.url);
@@ -53,5 +55,5 @@ export async function authenticate(c) {
 
   if (!(await verifyEd25519(row.pubkey, sig, message)))
     return { ok: false, status: 401, reason: "bad_signature" };
-  return { ok: true, identity: account, allowedProjects: row.allowed_projects };
+  return { ok: true, identity: account, allowedProjects: row.allowed_projects, isAdmin: !!row.is_admin };
 }

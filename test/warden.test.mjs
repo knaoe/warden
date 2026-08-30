@@ -53,12 +53,13 @@ async function req(method, path, body, account, key) {
 
 // Registers a new service account with an optional allowed_projects
 // restriction and returns { account, key } for use with req(..., account, key).
-async function registerAccount(id, allowedProjects) {
+async function registerAccount(id, allowedProjects, { isAdmin = false, expiresAt = null } = {}) {
   const { publicKey, privateKey: key } = generateKeyPairSync("ed25519");
   const pubB64 = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("base64");
-  await env.DB.prepare(`INSERT INTO service_accounts (id, pubkey, allowed_projects) VALUES (?, ?, ?)`)
-    .bind(id, pubB64, allowedProjects ?? null).run();
-  return { account: id, key };
+  await env.DB.prepare(
+    `INSERT INTO service_accounts (id, pubkey, allowed_projects, is_admin, expires_at) VALUES (?, ?, ?, ?, ?)`)
+    .bind(id, pubB64, allowedProjects ?? null, isAdmin ? 1 : 0, expiresAt).run();
+  return { account: id, key, pubkey: pubB64 };
 }
 
 test("unauthenticated request is rejected 401", async () => {
@@ -312,4 +313,65 @@ test("NULL allowed_projects remains unrestricted (back-compat for existing accou
 
   const r = await req("POST", "/work", { project: "any-project-at-all", title: "unrestricted" }, unrestricted.account, unrestricted.key);
   assert.equal(r.status, 200);
+});
+
+test("POST /service-accounts is rejected for a non-admin caller", async () => {
+  const { publicKey } = generateKeyPairSync("ed25519");
+  const pubB64 = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("base64");
+
+  const r = await req("POST", "/service-accounts", { id: "new-acct-1", pubkey: pubB64 });
+  assert.equal(r.status, 403);
+  assert.equal(r.body.error, "admin_required");
+});
+
+test("POST /service-accounts lets an admin mint a new time-limited account, and that account can then authenticate", async () => {
+  const admin = await registerAccount("admin-acct-1", null, { isAdmin: true });
+  const { publicKey, privateKey: newKey } = generateKeyPairSync("ed25519");
+  const pubB64 = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("base64");
+  const expiresAt = new Date(Date.now() + 3600_000).toISOString();
+
+  const r = await req("POST", "/service-accounts",
+    { id: "minted-acct-1", pubkey: pubB64, expires_at: expiresAt }, admin.account, admin.key);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.created.id, "minted-acct-1");
+  assert.equal(r.body.created.expires_at, expiresAt);
+  assert.equal(r.body.created.is_admin, 0); // minted accounts are not admin by default
+
+  const asMinted = await req("GET", "/work", undefined, "minted-acct-1", newKey);
+  assert.equal(asMinted.status, 200);
+});
+
+test("POST /service-accounts rejects a duplicate id", async () => {
+  const admin = await registerAccount("admin-acct-2", null, { isAdmin: true });
+  const { publicKey } = generateKeyPairSync("ed25519");
+  const pubB64 = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("base64");
+
+  const first = await req("POST", "/service-accounts", { id: "dup-acct", pubkey: pubB64 }, admin.account, admin.key);
+  assert.equal(first.status, 200);
+  const second = await req("POST", "/service-accounts", { id: "dup-acct", pubkey: pubB64 }, admin.account, admin.key);
+  assert.equal(second.status, 409);
+  assert.equal(second.body.error, "account_exists");
+});
+
+test("POST /service-accounts rejects a malformed pubkey and a past expires_at", async () => {
+  const admin = await registerAccount("admin-acct-3", null, { isAdmin: true });
+
+  const badKey = await req("POST", "/service-accounts", { id: "bad-key-acct", pubkey: "not-a-real-key" }, admin.account, admin.key);
+  assert.equal(badKey.status, 400);
+
+  const { publicKey } = generateKeyPairSync("ed25519");
+  const pubB64 = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("base64");
+  const pastDate = new Date(Date.now() - 3600_000).toISOString();
+  const badExpiry = await req("POST", "/service-accounts",
+    { id: "past-expiry-acct", pubkey: pubB64, expires_at: pastDate }, admin.account, admin.key);
+  assert.equal(badExpiry.status, 400);
+});
+
+test("an expired account is rejected with account_expired, independent of an otherwise-valid signature", async () => {
+  const pastDate = new Date(Date.now() - 1000).toISOString();
+  const expired = await registerAccount("expired-acct", null, { expiresAt: pastDate });
+
+  const r = await req("GET", "/work", undefined, expired.account, expired.key);
+  assert.equal(r.status, 401);
+  assert.equal(r.body.reason, "account_expired");
 });

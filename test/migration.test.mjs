@@ -41,7 +41,7 @@ test("checked-in D1 migration upgrades the pre-dashboard schema exactly once", (
   )[0].results;
   const accountColumns = queryJson(
     persistTo,
-    "SELECT name, type FROM pragma_table_info('service_accounts') WHERE name = 'allowed_projects'",
+    "SELECT name, type FROM pragma_table_info('service_accounts') WHERE name IN ('allowed_projects','expires_at','is_admin') ORDER BY name",
   )[0].results;
   const applied = queryJson(persistTo, "SELECT name FROM d1_migrations ORDER BY id")[0].results;
 
@@ -51,10 +51,15 @@ test("checked-in D1 migration upgrades the pre-dashboard schema exactly once", (
     { name: "gate_status", type: "TEXT" },
     { name: "gate_updated_at", type: "TEXT" },
   ]);
-  assert.deepEqual(accountColumns, [{ name: "allowed_projects", type: "TEXT" }]);
+  assert.deepEqual(accountColumns, [
+    { name: "allowed_projects", type: "TEXT" },
+    { name: "expires_at", type: "TEXT" },
+    { name: "is_admin", type: "INTEGER" },
+  ]);
   assert.deepEqual(applied, [
     { name: "0001_add_coordination_columns.sql" },
     { name: "0002_add_allowed_projects.sql" },
+    { name: "0003_add_account_lifecycle.sql" },
   ]);
   assert.match(secondApply, /No migrations to apply/);
 });
