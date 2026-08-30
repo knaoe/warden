@@ -15,6 +15,18 @@ const httpUrl = z.string().max(2048).url().refine((value) => {
 }, { message: "external_url must use http or https" });
 
 const workIdSchema = z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+const accountIdSchema = z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+const pubkeySchema = z.string().max(64).refine((v) => {
+  try { return atob(v).length === 32; } catch { return false; }
+}, { message: "pubkey must be base64 of a 32-byte ed25519 public key" });
+const createAccountSchema = z.object({
+  id: accountIdSchema,
+  pubkey: pubkeySchema,
+  allowed_projects: z.string().max(500).optional(),
+  expires_at: z.string().datetime().refine((v) => Date.parse(v) > Date.now(), {
+    message: "expires_at must be in the future",
+  }).optional(),
+});
 const createSchema = z.object({
   id: workIdSchema.optional(),
   project: z.string().min(1).max(80),
@@ -76,6 +88,7 @@ app.use("*", async (c, next) => {
   if (!r.ok) return c.json({ error: "unauthorized", reason: r.reason }, r.status);
   c.set("identity", r.identity);
   c.set("allowedProjects", r.allowedProjects);
+  c.set("isAdmin", r.isAdmin);
   await next();
 });
 
@@ -83,9 +96,39 @@ app.get("/", (c) =>
   c.json({
     ok: true,
     service: "warden",
-    endpoints: ["GET /portfolio", "POST /work", "GET /work", "GET /events", "POST /work/:id/claim", "POST /work/:id/state"],
+    endpoints: [
+      "GET /portfolio", "POST /work", "GET /work", "GET /events",
+      "POST /work/:id/claim", "POST /work/:id/state", "POST /service-accounts (admin only)",
+    ],
     auth: "Ed25519 request signature: X-Warden-Account / X-Warden-Timestamp / X-Warden-Signature",
   }));
+
+// Self-service account registration, admin-only. Lets a trusted caller (e.g.
+// PMO) mint a freshly-generated, optionally time-limited service account
+// without a manual `wrangler d1 execute` step. The new account is registered
+// by public key exactly as today's manual flow does -- this endpoint removes
+// the manual DB write, not key generation itself (each account still gets its
+// own independently generated ed25519 keypair, so a leaked key's blast radius
+// stays scoped to that one account).
+app.post("/service-accounts", zValidator("json", createAccountSchema), async (c) => {
+  if (!c.get("isAdmin")) return c.json({ error: "admin_required" }, 403);
+  const db = c.env.DB;
+  const b = c.req.valid("json");
+
+  const existing = await db.prepare(`SELECT id FROM service_accounts WHERE id=?`).bind(b.id).first();
+  if (existing) return c.json({ error: "account_exists" }, 409);
+
+  await db.prepare(
+    `INSERT INTO service_accounts (id, pubkey, allowed_projects, expires_at) VALUES (?, ?, ?, ?)`)
+    .bind(b.id, b.pubkey, b.allowed_projects ?? null, b.expires_at ?? null).run();
+  await db.prepare(`INSERT INTO events (work_item_id, kind, detail) VALUES (NULL, 'account_created', ?)`)
+    .bind(`${b.id} expires_at=${b.expires_at ?? "never"} by=${c.get("identity")}`).run();
+
+  const account = await db.prepare(
+    `SELECT id, allowed_projects, expires_at, is_admin, created_at FROM service_accounts WHERE id=?`,
+  ).bind(b.id).first();
+  return c.json({ created: account });
+});
 
 // Attention-first portfolio briefing ("how is everything?"). Unscoped (no
 // ?project=) is a genuinely useful cross-team overview; scoped keeps one

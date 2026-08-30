@@ -21,6 +21,7 @@ The fencing model is **stable logical identity, disposable process incarnation**
 - `GET /work` — list work items.
 - `POST /work/:id/claim` — claim with a fencing token: `{ owner, epoch }`. Succeeds only if `epoch > stored owner_epoch` (newer incarnation wins; stale → `409`).
 - `POST /work/:id/state` — update state: `{ state, epoch, blocked_reason?, next_action?, needs_you? }`, fenced (`epoch >= owner_epoch`; stale writer → `409`).
+- `POST /service-accounts` — **admin-only.** Mint a new service account: `{ id, pubkey, allowed_projects?, expires_at? }`. `expires_at` must be a future ISO timestamp; the account's signatures are rejected once it passes. Duplicate `id` → `409`.
 
 Routing is [Hono](https://hono.dev); request bodies are validated with [Zod](https://zod.dev) and rejected with `400` before any database access. All SQL uses D1 prepared statements with bound parameters (no user input is interpolated into SQL text).
 
@@ -36,15 +37,40 @@ v1\n<METHOD>\n<path+query>\n<unix-timestamp>\n<sha256hex(body)>
 
 Requests outside a ±300s clock window, from an unknown/disabled account, or with a bad signature get `401`.
 
-Add a service account:
+Add the *first* service account by hand (bootstrapping — no admin exists yet to call the API below):
 
 ```sh
 node scripts/warden-keygen.mjs pmo        # writes warden-pmo.pem (private, gitignored); prints the public key
 wrangler d1 execute warden --remote --command \
-  "INSERT INTO service_accounts (id,pubkey) VALUES ('pmo','<printed-pubkey>');"
+  "INSERT INTO service_accounts (id,pubkey,is_admin) VALUES ('pmo','<printed-pubkey>',1);"
 ```
 
 Revoke with `UPDATE service_accounts SET disabled=1 WHERE id='pmo';`.
+
+### Self-service account issuance
+
+An account with `is_admin=1` can mint further accounts via `POST /service-accounts`
+instead of a manual D1 write — each one still gets its own independently
+generated ed25519 keypair (this removes the manual *registration* step, not
+key generation itself, so one leaked key's blast radius stays scoped to that
+one account). Typical use: an orchestrator holding one admin key mints a
+short-lived, non-admin key per ephemeral session (a PM spawn, a cloud worker)
+rather than reusing one long-lived key everywhere.
+
+```sh
+node scripts/warden-keygen.mjs pm-spawn-42   # local keypair, nothing registered yet
+node scripts/warden-sign.mjs pmo warden-pmo.pem POST /service-accounts \
+  '{"id":"pm-spawn-42","pubkey":"<printed-pubkey>","expires_at":"2026-08-31T00:00:00Z"}' > /tmp/h
+curl -H @/tmp/h -H 'content-type: application/json' \
+  -d '{"id":"pm-spawn-42","pubkey":"<printed-pubkey>","expires_at":"2026-08-31T00:00:00Z"}' \
+  https://warden.<subdomain>.workers.dev/service-accounts
+```
+
+Minted accounts are never admin (`is_admin` is not settable through this
+endpoint) — an admin key still needs a manual, deliberate D1 write, same as
+today's bootstrap step. `expires_at` is enforced on every request once it
+passes (`401 account_expired`); an account with no `expires_at` never expires
+on its own and is revoked the existing way (`disabled=1`).
 
 Sign + call (the helper emits headers one per line; pair with `curl -H @file`):
 
@@ -119,7 +145,7 @@ WARDEN_URL="https://warden.<your-subdomain>.workers.dev" node demo.mjs
 ## Status / not yet
 
 - Auth is **Ed25519 request signatures** (see [Auth](#auth)) — a private control plane. Clock-skew window is ±300s; add a nonce store if you need stricter replay protection.
-- Warden authenticates the calling service account but does not yet enforce per-account route/method scope — any registered account can call any route. Least privilege is currently conventional, not server-enforced.
+- Warden authenticates the calling service account but does not yet enforce general per-account route/method scope — any registered account can call any `/work*` route. Least privilege there is currently conventional, not server-enforced. The one exception is `POST /service-accounts`, which is hard-gated on `is_admin` (see [Self-service account issuance](#self-service-account-issuance)) precisely because an unscoped mint-new-accounts endpoint would let any leaked key re-provision itself indefinitely.
 - Vigil (`board/`) has **no auth of its own**: `board/server.mjs` binds `0.0.0.0` by default and `GET /api/board` relays the full ledger snapshot to any caller who can reach it. Fine on a private tailnet/LAN; do not expose it publicly or bind it to a public interface.
 - `commands` / `leases` / `attempts` are folded into `work_items` for now.
 - No lease-expiry reclaim yet (correctness is guaranteed by epoch fencing, not by lease timeout).
